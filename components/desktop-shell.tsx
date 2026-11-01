@@ -1060,6 +1060,7 @@ export function DesktopShell({ initialThemeProfile, initialThemeAssets }: Deskto
   const [glassPaintPass, setGlassPaintPass] = useState(0);
   const [notice, setNotice] = useState<string | null>(null);
   const [activeApp, setActiveApp] = useState<DesktopIconId | null>(null);
+  const [ifTheaterReading, setIFTheaterReading] = useState(false);
   const [customApps, setCustomApps] = useState<InstalledCustomApp[]>([]);
   // 自定义 APP 桌面图标样式偏好（global = 忽略上传图标走全局效果）
   const [customAppIconStyles, setCustomAppIconStyles] = useState<Record<string, CustomAppIconStyle>>({});
@@ -4074,7 +4075,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     if (activeApp === "mapmode") {
       return <MapApp onClose={() => setActiveApp(null)} />;
     }
-    if (activeApp === "iftheater") return <IFTheaterApp onClose={() => setActiveApp(null)} />;
+    if (activeApp === "iftheater") return <IFTheaterApp onClose={() => setActiveApp(null)} onReadingChange={setIFTheaterReading} />;
 
     if (activeApp === "dwelling") {
       // DwellingApp is rendered separately (kept alive) — see below
@@ -4811,8 +4812,10 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
                   })}
                 </footer>
               ) : null}
-              <DebugPromptPanel />
-              <QuickActionFloat />
+              <div data-if-global-tools hidden={activeApp === "iftheater" && ifTheaterReading} style={{ display: activeApp === "iftheater" && ifTheaterReading ? "none" : undefined }}>
+                <DebugPromptPanel />
+                <QuickActionFloat />
+              </div>
               <MascotFloat />
               {/* 预览弹窗宿主：独立于桌宠的展开/收起状态，否则桌宠收成小球时弹不出来 */}
               <MascotPreviewHost />

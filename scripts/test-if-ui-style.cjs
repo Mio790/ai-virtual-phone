@@ -11,11 +11,24 @@ assert.ok(value('.root textarea, .root select', 'background')); assert.ok(value(
 assert.equal(value('.root textarea::placeholder', 'opacity'), '.8');
 assert.equal(value('.scroll', 'min-height'), '0'); assert.equal(value('.scroll', 'overflow-y'), 'auto');
 assert.equal(value('.root', 'overflow'), 'hidden');
+assert.equal(value('.composer', 'display'), 'flex');
+assert.equal(value('.root .composer textarea', 'min-height'), '44px');
+assert.equal(value('.root .composer textarea', 'max-height'), '112px');
+assert.equal(value('.root .composer textarea', 'resize'), 'none');
+assert.equal(value('.composer > button', 'height'), '44px');
+assert.equal(value('.root[data-keyboard="true"] .composer', 'padding-bottom'), '8px');
+assert.equal(value('.reading h1', 'white-space'), 'nowrap');
+assert.equal(value('.settingsSheet', 'max-height'), '88%');
+assert.equal(value('.promptSheet .pre', 'min-height'), '0');
 assert.match(value('.header', 'padding'), /safe-area-inset-top/);
 assert.match(value('.footer, .composer', 'padding'), /safe-area-inset-bottom/);
 assert.ok(rule('.root button:focus-visible, .root summary:focus-visible, .root input:focus-visible,\n.root textarea:focus-visible, .root select:focus-visible')[0].toString().includes('outline: 3px'));
 const source = fs.readFileSync('components/if-theater/if-theater-app.tsx', 'utf8');
 assert.ok(!source.includes('color: "#111"')); assert.ok(!source.includes('background: "#17151b"'));
+const shell = fs.readFileSync('components/desktop-shell.tsx', 'utf8');
+assert.ok(shell.includes('<IFTheaterApp onClose={() => setActiveApp(null)} onReadingChange={setIFTheaterReading} />'), 'shell receives reading state');
+assert.ok(/<div data-if-global-tools hidden=\{activeApp === "iftheater" && ifTheaterReading\}[^>]+>\s*<DebugPromptPanel \/>\s*<QuickActionFloat \/>\s*<\/div>/.test(shell), 'only reading hides existing mounted tools');
+assert.ok(!shell.includes('setQuickActionEnabled(false)'), 'do not alter global floating-tool preference');
 function luminance(rgb) { const c = rgb.map(v => { v /= 255; return v <= .04045 ? v / 12.92 : ((v + .055) / 1.055) ** 2.4; }); return c[0] * .2126 + c[1] * .7152 + c[2] * .0722; }
 function ratio(a, b) { const x = luminance(a), y = luminance(b); return (Math.max(x, y) + .05) / (Math.min(x, y) + .05); }
 const blend = (a, b, alpha) => a.map((n, i) => n * alpha + b[i] * (1 - alpha));

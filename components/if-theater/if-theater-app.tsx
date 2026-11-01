@@ -1,5 +1,5 @@
 "use client";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { loadCharacters } from "@/lib/character-storage";
 import { loadApiConfigs } from "@/lib/settings-storage";
 import { streamIFReply } from "@/lib/if-theater-stream";
@@ -9,7 +9,25 @@ import { runIFStreamingTurn, recoverIFPending } from "@/lib/if-theater-turn";
 import { isIFOfflineAcceptance, IF_TEST_CONFIG, requestIFAcceptance } from "@/lib/if-theater-test-support";
 import ui from "./if-theater.module.css";
 
-export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
+function modalKeys(event: KeyboardEvent<HTMLDivElement>, close: () => void) {
+  if (event.key === "Escape") close();
+  if (event.key !== "Tab") return;
+  const controls = event.currentTarget.querySelectorAll<HTMLElement>('button:not(:disabled), select:not(:disabled), textarea:not(:disabled), summary, [tabindex="0"]');
+  const first = controls[0], last = controls[controls.length - 1];
+  if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+}
+
+export function fitIFComposer(field: HTMLTextAreaElement | null, available: number) {
+  if (!field) return;
+  const cap = Math.max(44, Math.min(112, available * .22));
+  field.style.height = "0px";
+  const height = field.scrollHeight;
+  field.style.height = `${Math.min(cap, Math.max(44, height))}px`;
+  field.style.overflowY = height > cap ? "auto" : "hidden";
+}
+
+export default function IFTheaterApp({ onClose, onReadingChange }: { onClose: () => void; onReadingChange?: (reading: boolean) => void }) {
   const [data, setData] = useState<IFData | null>(null);
   const [editing, setEditing] = useState<IFScript | null>(null);
   const [saveId, setSaveId] = useState("");
@@ -23,6 +41,8 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const [pending, setPending] = useState<IFPending[]>([]);
   const [memoryDraft, setMemoryDraft] = useState<{ saveId: string; text: string } | null>(null);
   const [acceptance, setAcceptance] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [promptOpen, setPromptOpen] = useState(false);
   const press = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointer = useRef({ x: 0, y: 0 });
   const controller = useRef<AbortController | null>(null);
@@ -31,9 +51,13 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const scroll = useRef<HTMLElement | null>(null);
   const dialog = useRef<HTMLDivElement | null>(null);
   const follow = useRef(true);
+  const composerInput = useRef<HTMLTextAreaElement | null>(null);
   const characters = loadCharacters();
   const configs = acceptance ? [IF_TEST_CONFIG] : loadApiConfigs();
   const save = data?.saves.find(item => item.id === saveId);
+  const reading = !!save && !editing;
+  useLayoutEffect(() => { onReadingChange?.(reading); }, [reading, onReadingChange]);
+  useEffect(() => () => onReadingChange?.(false), [onReadingChange]);
   useEffect(() => {
     let mounted = true;
     if (window.location && isIFOfflineAcceptance(window.location)) { setAcceptance(true); setApiId(IF_TEST_CONFIG.id); }
@@ -55,26 +79,29 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
         const available = Math.min(parent.bottom, viewport.offsetTop + viewport.height) - parent.top;
         element.style.setProperty("--if-visible-height", `${Math.max(0, Math.min(parent.height, available))}px`);
         element.dataset.keyboard = String(parent.height - available > 100);
+        fitIFComposer(composerInput.current, available);
+        if (follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
       });
     };
     viewport.addEventListener("resize", resize); viewport.addEventListener("scroll", resize); resize();
     return () => { cancelAnimationFrame(frame); viewport.removeEventListener("resize", resize); viewport.removeEventListener("scroll", resize); };
   }, []);
-  useEffect(() => { follow.current = true; }, [saveId]);
-  useEffect(() => {
+  useLayoutEffect(() => { follow.current = true; }, [saveId]);
+  useLayoutEffect(() => {
+    fitIFComposer(composerInput.current, root.current?.clientHeight || 600);
     if (save && !editing && follow.current && scroll.current) scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [saveId, save?.messages.length, partial, editing]);
+  }, [saveId, save?.messages.length, partial, editing, input]);
   useEffect(() => {
-    if (menu === null || typeof document === "undefined") return;
+    if ((menu === null && !settingsOpen && !promptOpen) || typeof document === "undefined") return;
     const previous = document.activeElement;
     dialog.current?.focus();
     return () => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }); };
-  }, [menu]);
+  }, [menu, settingsOpen, promptOpen]);
   const cancelPress = () => { if (press.current) clearTimeout(press.current); press.current = null; };
   const commit = async (next: IFData) => { const persisted = await writeIFData(next); setData(persisted); };
   const selectSave = async (id: string) => {
     if (!data) return;
-    await commit({ ...data, activeSaveId: id }); setSaveId(id); setMenu(null);
+    await commit({ ...data, activeSaveId: id }); setSaveId(id); setMenu(null); setSettingsOpen(false); setPromptOpen(false);
   };
   const run = async (action: () => Promise<void>) => {
     if (lock.current) return;
@@ -106,22 +133,23 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
       try { setPending(await readIFPending()); } catch (error) { setError(`检查点读取失败：${String(error)}`); }
     }
   };
-  return <section ref={root} className={ui.root} aria-label="多人 IF 剧场">
+  const recoveryPanels = pending.map(item => <details className={ui.panel} key={item.id}><summary>恢复中断的回复 <span className={ui.badge}>仅本地</span></summary><p className={ui.hint}>恢复不请求模型；历史不一致时拒绝覆盖。</p><pre className={ui.pre}>{item.text || "请求前检查点，尚无回复"}</pre>
+    <div className={ui.actions}><button disabled={busy || !item.text.trim()} onClick={() => run(async () => {
+      const result = await recoverIFPending(item); setData(result.data); setSaveId(result.saveId); setError(result.warning); setPartial(""); setPending(await readIFPending()); setSettingsOpen(false);
+    })} className={ui.primary} aria-label="恢复部分回复（版本冲突时拒绝覆盖）">恢复部分回复</button>
+    <button className={ui.danger} disabled={busy} onClick={() => run(async () => { if (confirm("仅移除这个检查点？已保存的剧情不会删除；请先复制需要的文本。")) { await clearIFPending(item.id); setPending(await readIFPending()); } })}>移除检查点</button></div>
+  </details>);
+  return <section ref={root} className={`${ui.root}${reading ? ` ${ui.reading}` : ""}`} aria-label="多人 IF 剧场">
     <header className={ui.header}>
-      <div className={ui.heading}><span className={ui.eyebrow}>IF THEATER</span><h1>{editing ? "编辑剧本" : save ? "剧情进行中" : "多人 IF 剧场"}</h1></div>
+      {reading && <button className={ui.backButton} aria-label="回到大厅" disabled={busy} onClick={() => run(() => selectSave(""))}>‹</button>}
+      <div className={ui.heading}>{!reading && <span className={ui.eyebrow}>IF THEATER</span>}<h1>{editing ? "编辑剧本" : save ? save.title : "多人 IF 剧场"}</h1>{reading && <span className={ui.headerMeta}>{acceptance ? "零费用演练 · " : ""}分支 #{save!.id.slice(0, 6)}</span>}</div>
+      {reading && <button className={ui.secondary} disabled={busy} aria-label="聊天设置" onClick={() => setSettingsOpen(true)}>设置{pending.length ? ` · ${pending.length}` : ""}</button>}
       <button className={ui.secondary} disabled={busy} onClick={onClose}>关闭</button>
     </header>
-    <main ref={scroll} className={ui.scroll} onScroll={event => { const node = event.currentTarget; follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; }}>
-    {acceptance && <p className={ui.notice} role="status"><strong>本地合成验收模式 · 零费用</strong><br />IF 回复零网络，不使用真实 Key。数据仅存此预览域名；其他 App 不属于演练模式。</p>}
+    <main ref={scroll} className={ui.scroll} aria-label={reading ? "剧情消息" : undefined} onScroll={event => { const node = event.currentTarget; follow.current = node.scrollHeight - node.scrollTop - node.clientHeight < 120; }}>
+    {acceptance && !reading && <p className={ui.notice} role="status"><strong>本地合成验收模式 · 零费用</strong><br />IF 回复零网络，不使用真实 Key。数据仅存此预览域名；其他 App 不属于演练模式。</p>}
     {error && <p className={ui.error} role="alert">{error}</p>}
-    {pending.map(item => <details className={ui.panel} key={item.id}><summary>恢复中断的回复 <span className={ui.badge}>仅本地</span></summary><p className={ui.hint}>恢复不请求模型；历史不一致时拒绝覆盖。</p><pre className={ui.pre}>{item.text || "请求前检查点，尚无回复"}</pre>
-      <div className={ui.actions}>
-      <button disabled={busy || !item.text.trim()} onClick={() => run(async () => {
-        const result = await recoverIFPending(item); setData(result.data); setSaveId(result.saveId); setError(result.warning); setPartial(""); setPending(await readIFPending());
-      })} className={ui.primary} aria-label="恢复部分回复（版本冲突时拒绝覆盖）">恢复部分回复</button>
-      <button className={ui.danger} disabled={busy} onClick={() => run(async () => { if (confirm("仅移除这个检查点？已保存的剧情不会删除；请先复制需要的文本。")) { await clearIFPending(item.id); setPending(await readIFPending()); } })}>移除检查点</button>
-      </div>
-    </details>)}
+    {!reading && recoveryPanels}
     {!data ? <div className={ui.empty} role="status"><h2>正在读取剧场…</h2><p>读取失败不会覆盖旧数据。</p></div> : editing ? <>
       <div className={ui.intro}><span className={ui.badge}>剧本模板</span><h2>设定属于你的舞台</h2><p>保存完整原文。模板的编辑不会改变已有存档。</p></div>
       <div className={ui.fields}>
@@ -140,19 +168,6 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
       </section>
       {editing.actors.map(actor => <label className={ui.field} key={actor.characterId}><span className={ui.fieldTitle}>{actor.name} · 剧本落地身份</span><span className={ui.hint}>时代身份、爵位、住所、财产与关系。原卡保持不变。</span><textarea aria-label={`${actor.name}的剧本身份`} disabled={busy} rows={4} placeholder="填写此角色在本剧本中的身份…" value={actor.identity} onChange={event => setEditing({ ...editing, actors: editing.actors.map(item => item.characterId === actor.characterId ? { ...item, identity: event.target.value } : item) })} /></label>)}
     </> : save ? <>
-      <div className={ui.chatHeading}><button className={ui.secondary} disabled={busy} onClick={() => run(() => selectSave(""))}>回到大厅</button><span className={ui.badge}>存档 #{save.id.slice(0, 6)}</span></div>
-      <h2 className={ui.saveTitle}>{save.title}</h2>
-      <section className={ui.panel} aria-label="当前存档与分支"><label className={ui.fieldTitle} htmlFor="if-branch">当前分支</label><select id="if-branch" disabled={busy} value={saveId} onChange={event => run(() => selectSave(event.target.value))}>{data.saves.filter(item => item.scriptId === save.scriptId).map(item => <option key={item.id} value={item.id}>{item.title} · #{item.id.slice(0, 6)}</option>)}</select><div className={ui.actions}><button disabled={busy} onClick={() => run(async () => { const branch = forkIFSave(save, save.messages.length); await commit({ ...data, activeSaveId: branch.id, saves: [...data.saves, branch] }); setSaveId(branch.id); setMenu(null); })}>另存当前分支</button><span className={ui.hint}>{save.messages.length} 条消息 · {save.script.actors.length} 位参演</span></div></section>
-      <details className={ui.panel}><summary>存档设定与专属记忆</summary><p className={ui.hint}>保存后每轮完整注入；其他分支与现代记忆不受影响。</p>
-        <label className={ui.field}><span className={ui.fieldTitle}>本分支记忆</span><textarea aria-label="IF 专属记忆" disabled={busy} rows={4} placeholder="记录本分支需要持续记住的事情…" value={memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory} onChange={event => setMemoryDraft({ saveId: save.id, text: event.target.value })} /></label>
-        <button disabled={busy} onClick={() => run(async () => { await commit(editIFMemory(data, save.id, memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory)); setMemoryDraft(null); })} aria-label="保存专属记忆（不调用模型）">保存专属记忆</button>
-        <p className={ui.hint}>原卡只读。手动刷新基础快照时，保留本剧本落地身份。</p>
-        <button disabled={busy} onClick={() => run(async () => {
-          const actors = save.script.actors.map(actor => ({ ...snapshot(actor.characterId), identity: actor.identity }));
-          await commit({ ...data, saves: data.saves.map(item => item.id === save.id ? { ...save, script: { ...save.script, actors } } : item) });
-        })} aria-label="主动刷新角色基础快照（保留落地身份）">刷新角色基础快照</button>
-      </details>
-      <p className={ui.transcriptLabel}>当前分支的剧情 <span>长按气泡或点「操作」</span></p>
       {!save.messages.length && <div className={ui.empty}><h3>这一幕，由你开始</h3><p>在下方输入消息，发送后只请求一次模型。</p></div>}
       {save.messages.map((message, i) => {
         const versions = data.replyVersions?.find(group => group.index === i && group.saveIds.includes(save.id));
@@ -163,7 +178,6 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
         </article>;
       })}
       {partial && <article className={`${ui.message} ${ui.streaming}`}><strong>{busy ? "正在生成…" : "未保存的回复 · 请先复制保留"}</strong><p>{partial}</p></article>}
-      {prompt && <details className={ui.panel} open><summary>实际请求 Prompt <span className={ui.badge}>不含 Key</span></summary><pre className={ui.pre}>{prompt}</pre></details>}
     </> : <>
       <div className={ui.intro}><span className={ui.badge}>独立世界 · 多人叙事</span><h2>让故事，换一种可能。</h2><p>选择一场剧本，带上熟悉的角色。每个存档、每条分支，都有自己的经历。</p><button className={ui.primary} disabled={busy} onClick={() => setEditing(blank())}>＋ 新建剧本</button></div>
       <div className={ui.sectionTitle}><h2>剧本大厅</h2><span className={ui.badge}>{data.scripts.length} 个剧本</span></div>
@@ -176,21 +190,21 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
     </main>
     {data && editing && <footer className={ui.footer}><button className={ui.secondary} disabled={busy} onClick={() => setEditing(null)}>取消</button><button className={ui.primary} disabled={busy} onClick={() => run(async () => { await commit({ ...data, scripts: [...data.scripts.filter(item => item.id !== editing.id), editing] }); setEditing(null); })}>保存剧本</button></footer>}
     {data && save && !editing && <footer className={ui.composer}>
-      <label className={ui.apiLabel} htmlFor="if-api">本轮 API 配置<select id="if-api" disabled={busy} value={apiId} onChange={event => setApiId(event.target.value)}><option value="">请选择（不自动调用）</option>{configs.map(config => <option key={config.id} value={config.id}>{config.name} · {config.defaultModel}</option>)}</select></label>
-      <textarea aria-label="剧场消息" disabled={busy} rows={2} placeholder="写下你的台词或行动…" value={input} onChange={event => setInput(event.target.value)} />
-      <div className={ui.sendRow}><button className={ui.secondary} disabled={busy || !input.trim()} aria-label="查看本轮完整 Prompt" onClick={() => setPrompt(JSON.stringify(buildIFPrompt(save, input), null, 2))}>查看 Prompt</button><button className={ui.danger} disabled={!busy || !controller.current} aria-label="Stop" onClick={() => controller.current?.abort()}>停止 Stop</button><button className={ui.primary} disabled={busy || !input.trim() || !apiId} aria-label="发送一次请求" onClick={() => run(() => generate())}>发送 Send</button></div>
-      <p className={ui.composerHint} role="status">{busy ? "生成中 · 可随时停止，已收到的内容会尝试保存" : "一次发送，仅一次请求 · 不自动总结"}</p>
+      <textarea ref={composerInput} aria-label="剧场消息" disabled={busy} rows={1} placeholder={apiId ? "写下你的台词或行动…" : "先在右上角「设置」选择 API…"} value={input} onChange={event => setInput(event.target.value)} />
+      {busy && controller.current ? <button className={ui.danger} aria-label="Stop" onClick={() => controller.current?.abort()}>停止</button> : <button className={ui.primary} disabled={busy || !input.trim() || !apiId} aria-label="发送一次请求" onClick={() => run(() => generate())}>发送</button>}
     </footer>}
+    {data && save && settingsOpen && <div className={ui.scrim} onClick={event => { if (event.target === event.currentTarget && !busy) setSettingsOpen(false); }}><div ref={dialog} className={`${ui.sheet} ${ui.settingsSheet}`} role="dialog" aria-modal="true" aria-label="聊天设置" tabIndex={-1} onKeyDown={event => modalKeys(event, () => { if (!busy) setSettingsOpen(false); })}>
+      <div className={ui.sheetTitle}><h2>聊天设置</h2><button disabled={busy} aria-label="关闭聊天设置" onClick={() => setSettingsOpen(false)}>完成</button></div>
+      <p className={ui.hint}>当前存档 #{save.id.slice(0, 6)} · 全局快捷浮层在阅读时暂时隐藏，返回大厅恢复。</p>
+      <label className={ui.field}><span className={ui.fieldTitle}>本轮 API 配置</span><select aria-label="本轮 API 配置" disabled={busy} value={apiId} onChange={event => setApiId(event.target.value)}><option value="">请选择（不自动调用）</option>{configs.map(config => <option key={config.id} value={config.id}>{config.name} · {config.defaultModel}</option>)}</select></label>
+      <div className={ui.actions}><button disabled={busy || !input.trim()} aria-label="查看本轮完整 Prompt" onClick={() => { setPrompt(JSON.stringify(buildIFPrompt(save, input), null, 2)); setSettingsOpen(false); setPromptOpen(true); }}>查看待发送 Prompt</button>{prompt && <button disabled={busy} onClick={() => { setSettingsOpen(false); setPromptOpen(true); }}>查看最近 Prompt</button>}</div>
+      <section className={ui.panel} aria-label="当前存档与分支"><label className={ui.fieldTitle} htmlFor="if-branch">当前分支</label><select id="if-branch" disabled={busy} value={saveId} onChange={event => run(() => selectSave(event.target.value))}>{data.saves.filter(item => item.scriptId === save.scriptId).map(item => <option key={item.id} value={item.id}>{item.title} · #{item.id.slice(0, 6)}</option>)}</select><div className={ui.actions}><button disabled={busy} onClick={() => run(async () => { const branch = forkIFSave(save, save.messages.length); await commit({ ...data, activeSaveId: branch.id, saves: [...data.saves, branch] }); setSaveId(branch.id); setMenu(null); setSettingsOpen(false); })}>另存当前分支</button><span className={ui.hint}>{save.messages.length} 条消息 · {save.script.actors.length} 位参演</span></div></section>
+      <details className={ui.panel}><summary>存档设定与专属记忆</summary><p className={ui.hint}>保存后每轮完整注入；其他分支与现代记忆不受影响。</p><label className={ui.field}><span className={ui.fieldTitle}>本分支记忆</span><textarea aria-label="IF 专属记忆" disabled={busy} rows={4} placeholder="记录本分支需要持续记住的事情…" value={memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory} onChange={event => setMemoryDraft({ saveId: save.id, text: event.target.value })} /></label><button disabled={busy} onClick={() => run(async () => { await commit(editIFMemory(data, save.id, memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory)); setMemoryDraft(null); })} aria-label="保存专属记忆（不调用模型）">保存专属记忆</button><p className={ui.hint}>原卡只读，刷新快照会保留剧本身份。</p><button disabled={busy} onClick={() => run(async () => { const actors = save.script.actors.map(actor => ({ ...snapshot(actor.characterId), identity: actor.identity })); await commit({ ...data, saves: data.saves.map(item => item.id === save.id ? { ...save, script: { ...save.script, actors } } : item) }); })} aria-label="主动刷新角色基础快照（保留落地身份）">刷新角色基础快照</button></details>
+      {recoveryPanels}
+    </div></div>}
+    {promptOpen && <div className={ui.scrim} onClick={event => { if (event.target === event.currentTarget) setPromptOpen(false); }}><div ref={dialog} className={`${ui.sheet} ${ui.promptSheet}`} role="dialog" aria-modal="true" aria-label="Prompt 查看" tabIndex={-1} onKeyDown={event => modalKeys(event, () => setPromptOpen(false))}><div className={ui.sheetTitle}><h2>Prompt · 不含 Key</h2><button aria-label="关闭 Prompt" onClick={() => setPromptOpen(false)}>关闭</button></div><p className={ui.hint}>仅查看快照，不发起模型请求。</p><pre className={ui.pre}>{prompt}</pre></div></div>}
     {data && save && menu !== null && <div className={ui.scrim} onClick={event => { if (event.target === event.currentTarget && !busy) setMenu(null); }}>
-      <div ref={dialog} className={ui.sheet} role="dialog" aria-modal="true" aria-label="气泡操作" tabIndex={-1} onKeyDown={event => {
-        if (event.key === 'Escape' && !busy) setMenu(null);
-        if (event.key === 'Tab') {
-          const buttons = event.currentTarget.querySelectorAll<HTMLButtonElement>('button:not(:disabled)');
-          const first = buttons[0], last = buttons[buttons.length - 1];
-          if (event.shiftKey && (document.activeElement === first || document.activeElement === event.currentTarget)) { event.preventDefault(); last?.focus(); }
-          else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
-        }
-      }}><span className={ui.sheetHandle} /><h2>消息操作</h2><p className={ui.hint}>第 {menu + 1} 条 · 当前存档 #{save.id.slice(0, 6)}<br />历史修改另存分支，原剧情不会被覆盖。</p>
+      <div ref={dialog} className={ui.sheet} role="dialog" aria-modal="true" aria-label="气泡操作" tabIndex={-1} onKeyDown={event => modalKeys(event, () => { if (!busy) setMenu(null); })}><span className={ui.sheetHandle} /><h2>消息操作</h2><p className={ui.hint}>第 {menu + 1} 条 · 当前存档 #{save.id.slice(0, 6)}<br />历史修改另存分支，原剧情不会被覆盖。</p>
         <button className={ui.primary} disabled={busy || save.messages[menu]?.role !== "assistant" || save.messages[menu - 1]?.role !== "user"} aria-label="Re-roll（一次请求）" onClick={() => run(() => generate(menu))}>重新生成 Re-roll <small>一次请求，保留旧版本</small></button>
         {([['Edit', '编辑消息'], ['Backtrack', '回溯到这里'], ['Delete', '从新分支移除此条及后续']] as const).map(([action, label]) => <button className={action === 'Delete' ? ui.danger : ui.secondary} disabled={busy} aria-label={action} key={action} onClick={() => run(async () => {
           const text = action === "Edit" ? window.prompt("编辑消息（另存分支，原后续保留）", save.messages[menu].content) : null;
