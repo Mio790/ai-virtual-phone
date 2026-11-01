@@ -31,6 +31,7 @@ import { Toggle } from "@/components/ui/form";
 import { getApiLogs } from "@/lib/api-log-store";
 import { parseWorldSkeleton } from "@/lib/map-rpg-engine";
 import { persistMapWorld } from "@/lib/map-storage";
+import { removeCompanionNPCs } from "@/lib/map-companions";
 
 type Props = {
   onClose: () => void;
@@ -91,14 +92,10 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
       const renderedMap = generateMap(skeleton.mapInput, geo);
       if (!renderedMap.l1Nodes.length) throw new Error("地图没有起始节点");
       const selected = characters.filter(character => selectedCharIds.includes(character.id));
-      const names = new Set(selected.flatMap(character => character.name.split(/[／/|｜]/).map(name => name.trim().toLowerCase())));
-      const isCompanion = (name: string) => names.has(name.trim().toLowerCase());
-      skeleton.npcs = skeleton.npcs.filter(npc => !isCompanion(npc.name));
-      for (const region of skeleton.richRegions) {
-        if (region.l1_npc && isCompanion(region.l1_npc.name)) region.l1_npc = undefined;
-        for (const node of [...region.l2_nodes, ...region.l3_nodes]) if (node.npc && isCompanion(node.npc.name)) node.npc = undefined;
-      }
-      let save = createInitialSave(recoveryWorld.id, renderedMap.l1Nodes[0].id);
+      stage = "校验同行身份";
+      removeCompanionNPCs(skeleton, selected);
+      const existingSave = getLatestSave(recoveryWorld.id);
+      let save = existingSave ? structuredClone(existingSave) : createInitialSave(recoveryWorld.id, renderedMap.l1Nodes[0].id);
       for (const character of selected) save = addAgentToSave(save, character.id, character.personality || "");
       stage = "写入并校验世界与存档";
       await persistMapWorld({ ...recoveryWorld, skeleton, renderedMap, generationRaw: recoveryText, status: undefined, statusMessage: undefined, failureRaw: undefined, updatedAt: new Date().toISOString() }, save);
@@ -256,13 +253,8 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
         await persistMapWorld({ ...placeholder, generationRaw: raw });
         stage = "解析世界";
       });
-      const companionNames = new Set(companions.flatMap(character => character.name.split(/[／/|｜]/).map(name => name.trim().toLowerCase())));
-      const companionNPC = (name: string) => companionNames.has(name.trim().toLowerCase());
-      skeleton.npcs = skeleton.npcs.filter(npc => !companionNPC(npc.name));
-      for (const region of skeleton.richRegions) {
-        if (region.l1_npc && companionNPC(region.l1_npc.name)) region.l1_npc = undefined;
-        for (const node of [...region.l2_nodes, ...region.l3_nodes]) if (node.npc && companionNPC(node.npc.name)) node.npc = undefined;
-      }
+      stage = "校验同行身份";
+      removeCompanionNPCs(skeleton, companions);
 
       stage = "加载地图地理数据";
       const resp = await fetch("/countries.geo.json");
