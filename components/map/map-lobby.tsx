@@ -7,9 +7,7 @@ import {
   getLatestSave,
   deleteMapWorld,
   generateWorldId,
-  saveMapWorld,
   createInitialSave,
-  saveGame,
   addAgentToSave,
   loadDMPrompts,
   saveDMPrompts,
@@ -30,6 +28,12 @@ import { generateMap, type GeoJSONData } from "@/lib/map-engine";
 import { loadApiConfigs, loadBindingConfig, resolveBinding } from "@/lib/settings-storage";
 import type { MapWorld, GameSave } from "@/lib/map-types";
 import { Toggle } from "@/components/ui/form";
+import { getApiLogs } from "@/lib/api-log-store";
+import { parseWorldSkeleton } from "@/lib/map-rpg-engine";
+import { persistMapWorld } from "@/lib/map-storage";
+import { removeCompanionNPCs, CompanionIdentityError } from "@/lib/map-companions";
+import { assertRecoveryMapCompatible } from "@/lib/map-recovery-compat";
+import { loadSavesForWorld } from "@/lib/map-storage";
 
 type Props = {
   onClose: () => void;
@@ -70,6 +74,48 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [genError, setGenError] = useState<{ reason: string; raw: string } | null>(null);
+  const [recoveryWorld, setRecoveryWorld] = useState<MapWorld | null>(null);
+  const [recoveryText, setRecoveryText] = useState("");
+  const [recoveryError, setRecoveryError] = useState("");
+  const [recovering, setRecovering] = useState(false);
+  const [identityReview, setIdentityReview] = useState<{ fingerprint: string; conflicts: CompanionIdentityError["conflicts"]; decisions: Record<string, string> } | null>(null);
+  const recoveryLogs = recoveryWorld ? getApiLogs().filter(log => /\[世界名\]/.test(log.rawResponse) && /#\s*区域/.test(log.rawResponse)) : [];
+
+  const recoverWorld = async () => {
+    if (!recoveryWorld || recovering) return;
+    setRecovering(true);
+    let stage = "解析完整原文";
+    try {
+      const skeleton = parseWorldSkeleton(recoveryText);
+      stage = "加载地图地理数据";
+      const response = await fetch("/countries.geo.json");
+      if (!response.ok) throw new Error(`GeoJSON HTTP ${response.status}`);
+      const geo: GeoJSONData = await response.json();
+      stage = "绘制地图";
+      const renderedMap = generateMap(skeleton.mapInput, geo);
+      if (!renderedMap.l1Nodes.length) throw new Error("地图没有起始节点");
+      const selected = characters.filter(character => selectedCharIds.includes(character.id));
+      stage = "校验同行身份";
+      const fingerprint = JSON.stringify([recoveryWorld.id, recoveryText, selectedCharIds]);
+      try { removeCompanionNPCs(skeleton, selected, identityReview?.fingerprint === fingerprint ? identityReview.decisions : {}); }
+      catch (error) {
+        if (error instanceof CompanionIdentityError) setIdentityReview({ fingerprint, conflicts: error.conflicts, decisions: identityReview?.fingerprint === fingerprint ? identityReview.decisions : {} });
+        throw error;
+      }
+      stage = "校验旧存档地点";
+      assertRecoveryMapCompatible(recoveryWorld.renderedMap, renderedMap, loadSavesForWorld(recoveryWorld.id));
+      const existingSave = loadSavesForWorld(recoveryWorld.id)[0];
+      let save = existingSave ? structuredClone(existingSave) : createInitialSave(recoveryWorld.id, renderedMap.l1Nodes[0].id);
+      for (const character of selected) save = addAgentToSave(save, character.id, character.personality || "");
+      stage = "写入并校验世界与存档";
+      await persistMapWorld({ ...recoveryWorld, skeleton, renderedMap, generationRaw: recoveryText, status: undefined, statusMessage: undefined, failureRaw: undefined, updatedAt: new Date().toISOString() }, save);
+      setWorlds(loadMapWorlds());
+      setRecoveryWorld(null);
+    } catch (error) {
+      console.error(`[MapRecovery] ${stage}`, error);
+      setRecoveryError(`${stage}：${error instanceof Error ? error.message : String(error)}`);
+    } finally { setRecovering(false); }
+  };
 
   // DM prompt editor state
   const [dmPrompts, setDmPrompts] = useState(() => {
@@ -176,7 +222,7 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
     const firstChar = characters[0];
     const slot = firstChar ? resolveBinding(bindings, firstChar.id, "chat") : null;
     const apiConfig = (slot?.apiConfigId ? apiConfigs.find(c => c.id === slot.apiConfigId) : null) || apiConfigs.find(c => c.apiKey) || apiConfigs[0];
-    if (!apiConfig?.apiKey) { setError("未找到有效的API配置，请先在设置中配置API"); return; }
+    if (!apiConfig?.apiKey) { setIsGenerating(false); setError("未找到有效的API配置，请先在设置中配置API"); return; }
 
     // 1. Create placeholder world immediately
     const now = new Date().toISOString();
@@ -189,7 +235,8 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
       updatedAt: now,
       status: "generating",
     };
-    saveMapWorld(placeholder);
+    try { await persistMapWorld(placeholder); }
+    catch (error) { console.error("[WorldGen] 保存占位世界", error); setError(`保存占位世界失败：${error instanceof Error ? error.message : String(error)}`); setIsGenerating(false); return; }
     setWorlds(loadMapWorlds());
     setMode("list");
     setIsGenerating(false);
@@ -198,6 +245,8 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
     const charIdsSnapshot = [...selectedCharIds];
 
     // 3. Generate in background
+    let stage = "请求模型与解析世界";
+    let completeRaw = "";
     try {
       const vars = {
         world_desc: description,
@@ -207,21 +256,32 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
         npc_count: String(npcCount),
         difficulty: difficulty || "适中",
       };
-      const skeleton = await generateWorldSkeleton(description, [], apiConfig, vars);
+      const companions = characters.filter(character => charIdsSnapshot.includes(character.id));
+      const skeleton = await generateWorldSkeleton(description, companions.map(character => `${character.name}：${character.personality || ""}（既有同行角色，不得另建为NPC）`), apiConfig, vars, async raw => {
+        completeRaw = raw;
+        stage = "保存完整模型原文";
+        await persistMapWorld({ ...placeholder, generationRaw: raw });
+        stage = "解析世界";
+      });
+      stage = "校验同行身份";
+      removeCompanionNPCs(skeleton, companions);
 
+      stage = "加载地图地理数据";
       const resp = await fetch("/countries.geo.json");
+      if (!resp.ok) throw new Error(`GeoJSON HTTP ${resp.status}`);
       const geoData: GeoJSONData = await resp.json();
+      stage = "绘制地图";
       const renderedMap = generateMap(skeleton.mapInput, geoData);
 
       // 4. Update world with real data (remove status = complete)
       const world: MapWorld = {
         id: worldId,
         skeleton,
+        generationRaw: completeRaw,
         renderedMap,
         createdAt: now,
         updatedAt: new Date().toISOString(),
       };
-      saveMapWorld(world);
 
       // 5. Create initial save with selected characters
       const startNode = renderedMap.l1Nodes[0]?.id || "l1_0";
@@ -237,15 +297,17 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
       renderedMap.l1Nodes.forEach((n) => { if (!discovered.includes(n.id)) discovered.push(n.id); });
       save.discoveredNodes = discovered;
       save.journal[0].locationName = renderedMap.l1Nodes[0]?.nameCn || "起点";
-      saveGame(save);
+      stage = "写入并校验世界与存档";
+      await persistMapWorld(world, save);
 
       setWorlds(loadMapWorlds());
     } catch (e) {
       // Mark as failed + surface reason and raw LLM output in a dialog.
-      const reason = e instanceof Error ? e.message : String(e);
-      const raw = (e as { rawOutput?: string })?.rawOutput || "";
-      const failed: MapWorld = { ...placeholder, status: "failed", statusMessage: reason, failureRaw: raw, updatedAt: new Date().toISOString() };
-      saveMapWorld(failed);
+      console.error(`[WorldGen] ${stage}`, e);
+      const reason = `${stage}：${e instanceof Error ? e.message : String(e)}`;
+      const raw = completeRaw || (e as { rawOutput?: string })?.rawOutput || "";
+      const failed: MapWorld = { ...placeholder, generationRaw: raw, status: "failed", statusMessage: reason, failureRaw: raw, updatedAt: new Date().toISOString() };
+      try { await persistMapWorld(failed); } catch (storageError) { console.error("[WorldGen] 保存失败详情", storageError); }
       setWorlds(loadMapWorlds());
       setGenError({ reason, raw });
     }
@@ -289,6 +351,22 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
 
   return (
     <div style={S.root}>
+      {recoveryWorld && <div style={{ position: "absolute", inset: 0, zIndex: 100, background: "#101018", overflow: "auto", padding: 24 }}>
+        <h3>离线恢复：{recoveryWorld.skeleton.world.name}</h3>
+        <p>不会请求模型；恢复到当前世界，不另建世界。请检查完整原文并重新选择同行角色。</p>
+        <select defaultValue="" onChange={event => { const log = recoveryLogs.find(item => item.id === event.target.value); if (log) setRecoveryText(log.rawResponse); }}>
+          <option value="">选择已有 API 日志（截断日志不可恢复）</option>
+          {recoveryLogs.map(log => <option key={log.id} value={log.id}>{log.timestamp} · {log.rawResponse.slice(0, 70)}</option>)}
+        </select>
+        <p>也可粘贴完整 AI 原文，或导入 UTF-8 文本文件：</p>
+        <input type="file" accept=".txt,.md,text/plain" onChange={async event => { try { const file = event.target.files?.[0]; if (file) setRecoveryText(await file.text()); } catch (error) { setRecoveryError(`读取文本失败：${String(error)}`); } }} />
+        <textarea aria-label="完整世界原文预览与编辑" value={recoveryText} onChange={event => setRecoveryText(event.target.value)} style={{ display: "block", width: "100%", minHeight: 240, color: "black" }} />
+        {characters.map(character => <label key={character.id} style={{ display: "block" }}><input type="checkbox" checked={selectedCharIds.includes(character.id)} onChange={() => toggleChar(character.id)} />{character.name}</label>)}
+        {recoveryError && <p role="alert">{recoveryError}</p>}
+        {identityReview && identityReview.fingerprint === JSON.stringify([recoveryWorld.id, recoveryText, selectedCharIds]) && <fieldset><legend>逐项确认 NPC 身份（尚未保存）</legend>{identityReview.conflicts.map(conflict => <label key={conflict.key} style={{ display: "block" }}>{conflict.name}（记录 {Number(conflict.key) + 1}）<select value={identityReview.decisions[conflict.key] || ""} onChange={event => setIdentityReview({ ...identityReview, decisions: { ...identityReview.decisions, [conflict.key]: event.target.value } })}><option value="">请选择身份</option><option value="independent">独立 NPC，保留</option>{conflict.characterIds.map(id => <option key={id} value={id}>已选同行：{characters.find(character => character.id === id)?.name}（使用原角色 ID）</option>)}</select></label>)}<p>全部确认后再次点击“校验并离线恢复”；取消不会保存。</p></fieldset>}
+        <button disabled={recovering || !recoveryText.trim()} onClick={recoverWorld}>{recovering ? "恢复中…" : "校验并离线恢复"}</button>
+        <button disabled={recovering} onClick={() => setRecoveryWorld(null)}>取消</button>
+      </div>}
       <div style={S.header}>
         <button onClick={mode === "list" ? onClose : () => setMode("list")} style={S.btn}>
           <ArrowLeft size={20} />
@@ -340,6 +418,9 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
                   <div style={{ flex: 1, padding: "8px 0", textAlign: "center", fontSize: "calc(11px*var(--app-text-scale,1))", color: "rgba(255,200,100,0.4)", fontFamily: "monospace", letterSpacing: "0.1em" }}>
                     世界正在生成中...
                   </div>
+                )}
+                {w.status === "failed" && (
+                  <button onClick={() => { setRecoveryWorld(w); setRecoveryText(w.generationRaw || w.failureRaw || ""); setRecoveryError(""); }} style={{ color: "inherit", background: "transparent" }}>从已有日志恢复</button>
                 )}
                 {w.status === "failed" && (
                   <button onClick={() => setGenError({ reason: w.statusMessage || "生成失败", raw: w.failureRaw || "" })} style={{ flex: 1, padding: "8px 0", borderRadius: 6, border: "1px solid var(--c-adv-accent-dim)", background: "transparent", color: "var(--c-adv-accent)", fontSize: "calc(12px*var(--app-text-scale,1))", cursor: "pointer", fontFamily: "inherit" }}>

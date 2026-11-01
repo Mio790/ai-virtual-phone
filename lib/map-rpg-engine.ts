@@ -356,12 +356,13 @@ export async function generateWorldSkeleton(
   companionDescriptions: string[],
   apiConfig: ApiConfig,
   vars?: Record<string, string>,
+  onRawResponse?: (raw: string) => Promise<void>,
 ): Promise<WorldSkeleton> {
   // Replace {{variables}} in prompt
   let prompt = getActivePrompt("worldGen", DEFAULT_WORLD_GEN_PROMPT);
   if (vars) {
     for (const [key, val] of Object.entries(vars)) {
-      prompt = prompt.replace(new RegExp(`\\{\\{${key}\\}\\}`, "g"), val);
+      prompt = prompt.split(`{{${key}}}`).join(val);
     }
   }
 
@@ -382,6 +383,19 @@ export async function generateWorldSkeleton(
   if (!result.content) failWorldGen(result.error || "LLM 返回为空（没有任何输出）", "");
   if (result.wasTruncated) console.warn("[WorldGen] Output was truncated");
   const rawOutput = result.content as string;
+  await onRawResponse?.(rawOutput);
+  if (result.wasTruncated) failWorldGen("模型输出已截断，完整原文未到达，不能创建世界", rawOutput);
+  return parseWorldSkeleton(rawOutput);
+}
+
+/** Pure local parser: never invokes an API or repairs incomplete output. */
+export function parseWorldSkeleton(rawOutput: string): WorldSkeleton {
+  const failWorldGen = (reason: string, raw: string): never => {
+    const error = new Error(reason) as Error & { rawOutput: string };
+    error.rawOutput = raw;
+    throw error;
+  };
+  if (/\[日志截断[：:]/.test(rawOutput)) failWorldGen("日志已截断，请粘贴或导入完整 AI 原文", rawOutput);
 
   // Tagged-block format (no JSON quoting/escaping pitfalls, and far fewer output
   // tokens → shorter generation → much less likely to hit a connection timeout).
@@ -395,6 +409,17 @@ export async function generateWorldSkeleton(
   if (!Array.isArray(parsed.regions) || parsed.regions.length === 0) {
     failWorldGen("解析失败：没有解析到任何「#区域」（模型可能没按标签格式输出）", rawOutput);
   }
+  if (!parsed.world?.name || !parsed.world?.lore || !parsed.main_quest?.title || !parsed.main_quest?.stages?.length || !parsed.dm_dossier?.hidden_truth || !parsed.dm_dossier?.endgame) {
+    failWorldGen("世界文本不完整：需要世界名、世界观、区域、主线阶段、档案隐藏真相及结局", rawOutput);
+  }
+  const regionIds = new Set<string>();
+  for (const region of parsed.regions) {
+    if (!region.id || regionIds.has(region.id) || !region.l1_name_cn || !region.l2_nodes?.length || region.l2_nodes.some((node: { name?: string }) => !node.name)) {
+      failWorldGen("区域格式不完整或 ID 重复，不能创建存档", rawOutput);
+    }
+    regionIds.add(region.id);
+  }
+  if (parsed.regions.some((region: { adjacent_to: string[] }) => region.adjacent_to.some(id => !regionIds.has(id)))) failWorldGen("区域邻接引用不存在，不能创建存档", rawOutput);
 
   // Parse rich regions (nodes with NPC/quest/encounter bindings)
   const rawRegions = parsed.regions || [];
