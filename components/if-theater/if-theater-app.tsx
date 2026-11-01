@@ -2,8 +2,8 @@
 import { useEffect, useRef, useState } from "react";
 import { loadCharacters } from "@/lib/character-storage";
 import { loadApiConfigs } from "@/lib/settings-storage";
-import { simpleLLMCall } from "@/lib/api-helpers";
-import { buildIFPrompt, newIFId, newIFSave, sendIFTurn, type IFData, type IFScript } from "@/lib/if-theater";
+import { streamIFReply } from "@/lib/if-theater-stream";
+import { buildIFPrompt, newIFId, newIFSave, forkIFSave, type IFData, type IFScript } from "@/lib/if-theater";
 import { readIFData, writeIFData } from "@/lib/if-theater-storage";
 
 export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
@@ -15,6 +15,9 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const [busy, setBusy] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [apiId, setApiId] = useState("");
+  const [partial, setPartial] = useState("");
+  const [menu, setMenu] = useState<number | null>(null);
+  const press = useRef<ReturnType<typeof setTimeout> | null>(null);
   const controller = useRef<AbortController | null>(null);
   const lock = useRef(false);
   const characters = loadCharacters();
@@ -36,8 +39,8 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const blank = (): IFScript => ({ id: newIFId(), title: "新剧本", world: "", time: "", opening: "", player: "", rules: "", actors: [] });
   const style = { display: "block", width: "100%", minHeight: 80, color: "#111", marginBottom: 12 };
   return <section style={{ position: "absolute", inset: 0, overflow: "auto", padding: "max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom))", background: "#17151b", color: "#eee" }}>
-    <button disabled={busy} onClick={onClose}>关闭</button><h2>多人 IF 剧场 · 阶段 A</h2>
-    <p>独立剧本与存档。当前为非流式单次请求；流式、版本和分支操作待阶段 B。</p>
+    <button disabled={busy} onClick={onClose}>关闭</button><h2>多人 IF 剧场</h2>
+    <p>独立剧本与存档。历史修改另存分支，旧剧情保留。</p>
     {error && <p role="alert">{error}</p>}
     {!data ? <p>正在读取剧场…（读取失败不会覆盖旧数据）</p> : editing ? <>
       {([['title', '标题'], ['world', '完整世界观'], ['time', '时刻设定'], ['opening', '开场白'], ['player', '玩家主控人设'], ['rules', '剧本规则']] as const).map(([key, label]) => <label key={key}>{label}<textarea disabled={busy} style={style} value={editing[key]} onChange={event => setEditing({ ...editing, [key]: event.target.value })} /></label>)}
@@ -52,7 +55,15 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
         const actors = save.script.actors.map(actor => ({ ...snapshot(actor.characterId), identity: actor.identity }));
         await commit({ ...data, saves: data.saves.map(item => item.id === save.id ? { ...save, script: { ...save.script, actors } } : item) });
       })}>主动刷新角色基础快照（保留落地身份）</button>
-      {save.messages.map((message, i) => <article key={i} style={{ whiteSpace: "pre-wrap", padding: 12, margin: "12px 0", border: "1px solid #777" }}><strong>{message.role === "user" ? "你" : "剧场"}</strong><p>{message.content}</p></article>)}
+      <select disabled={busy} value={saveId} onChange={event => setSaveId(event.target.value)}>{data.saves.filter(item => item.scriptId === save.scriptId).map(item => <option key={item.id} value={item.id}>{item.title} · {item.id.slice(0, 6)}</option>)}</select>
+      {save.messages.map((message, i) => <article key={i} onContextMenu={event => { event.preventDefault(); if (!busy) setMenu(i); }} onPointerDown={() => { if (!busy) press.current = setTimeout(() => setMenu(i), 550); }} onPointerUp={() => { if (press.current) clearTimeout(press.current); }} onPointerCancel={() => { if (press.current) clearTimeout(press.current); }} onPointerMove={() => { if (press.current) clearTimeout(press.current); }} style={{ whiteSpace: "pre-wrap", padding: 12, margin: "12px 0", border: "1px solid #777" }}><strong>{message.role === "user" ? "你" : "剧场"}</strong><p>{message.content}</p><button disabled={busy} onClick={() => setMenu(i)}>操作</button></article>)}
+      {menu !== null && <div role="dialog" aria-label="气泡操作">{["Edit", "Delete", "Backtrack"].map(action => <button disabled={busy} key={action} onClick={() => run(async () => {
+        const text = action === "Edit" ? window.prompt("编辑消息（另存分支，原后续保留）", save.messages[menu].content) : null;
+        if (action === "Edit" && text === null) return;
+        const branch = forkIFSave(save, action === "Backtrack" ? menu + 1 : menu, action === "Edit" ? { ...save.messages[menu], content: text! } : undefined);
+        await commit({ ...data, saves: [...data.saves, branch] }); setSaveId(branch.id); setMenu(null);
+      })}>{action}</button>)}<button onClick={() => setMenu(null)}>取消</button></div>}
+      {partial && <article style={{ whiteSpace: "pre-wrap" }}>未完成回复（如保存失败可复制保留）：{partial}</article>}
       <label>本轮 API 配置<select disabled={busy} value={apiId} onChange={event => setApiId(event.target.value)}><option value="">请选择（不自动调用）</option>{configs.map(config => <option key={config.id} value={config.id}>{config.name} · {config.defaultModel}</option>)}</select></label>
       <textarea aria-label="剧场消息" disabled={busy} style={style} value={input} onChange={event => setInput(event.target.value)} />
       <button disabled={busy || !input.trim()} onClick={() => setPrompt(JSON.stringify(buildIFPrompt(save, input), null, 2))}>查看本轮完整 Prompt</button>
@@ -61,12 +72,15 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
         if (!config?.apiKey) throw new Error("所选 API 配置缺少 Key");
         const abort = new AbortController(); controller.current = abort;
         setPrompt(JSON.stringify(buildIFPrompt(save, input), null, 2));
-        const next = await sendIFTurn(save, input, abort.signal, async (messages, signal) => {
-          const result = await simpleLLMCall(config, messages, { signal, label: "IF剧场" });
-          if (!result.content) throw new Error(result.error || "返回为空");
-          return result.content;
-        });
-        await commit({ ...data, saves: data.saves.map(item => item.id === save.id ? next : item) }); setInput("");
+        let received = ""; setPartial("");
+        let incomplete = false;
+        try { await streamIFReply(config, buildIFPrompt(save, input), abort.signal, delta => { received += delta; setPartial(received); }); }
+        catch (error) { if (!received) throw error; incomplete = true; setError(`已停止或中断：${String(error)}；部分回复另存分支`); }
+        if (!received.trim()) throw new Error("返回为空，未修改历史");
+        const next = forkIFSave(save, save.messages.length);
+        next.title = `${save.title} · ${incomplete ? "未完成" : "续写"}`;
+        next.messages.push({ role: "user", content: input }, { role: "assistant", content: received });
+        await commit({ ...data, saves: [...data.saves, next] }); setSaveId(next.id); setInput(""); setPartial("");
       })}>发送一次请求</button><button disabled={!busy} onClick={() => controller.current?.abort()}>Stop</button>
       {prompt && <details open><summary>实际提交给请求适配器的 Prompt（不含 Key）</summary><pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{prompt}</pre></details>}
     </> : <>
