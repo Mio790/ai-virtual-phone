@@ -14,5 +14,5 @@ const { forkIFSave, rerollIFSave, buildIFPrompt } = ctx.exports;
  const abort = new AbortController(); abort.abort();
  await assert.rejects(rerollIFSave(save, 1, abort.signal, async () => { calls++; return 'bad'; }));
  assert.equal(calls, 1);
- console.log('PASS immutable edit/backtrack forks; reroll one call; no sibling/future context; abort no additional request. UI/stream/swipes/storage integration not covered.');
+ console.log('PASS immutable edit/backtrack forks; reroll one call; no sibling/future context; abort no additional request. B integration/event tests run separately.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

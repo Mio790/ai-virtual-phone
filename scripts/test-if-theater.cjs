@@ -49,6 +49,6 @@ function load(path) {
     assert.ok(!/from ["'].*(?:memory|chat-engine|group-chat)/.test(fs.readFileSync(path, 'utf8')));
   }
   console.log('PASS: one Mock transport call; full world/identity each turn; readonly snapshots; abort zero calls; script/save isolation; optimistic write conflict unchanged; simulated reload; unrelated KV sentinels unchanged');
-  console.log('NOT COVERED: React UI, real Safari, streaming, swipes/branches, full backup roundtrip, quota errors and crash recovery (B/C pending).');
+  console.log('This script covers stage A only; B integration/event tests run separately. Real Safari and full backup roundtrip remain unverified.');
   db.close();
 })().catch(error => { console.error(error); process.exitCode = 1; });
