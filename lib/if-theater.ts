@@ -6,6 +6,21 @@ export type IFPromptMessage = { role: "system" | "user" | "assistant"; content: 
 export type IFSave = { id: string; scriptId: string; title: string; script: IFScript; messages: IFMessage[]; memory: string };
 export type IFData = { revision: number; scripts: IFScript[]; saves: IFSave[] };
 export const newIFId = () => crypto.randomUUID();
+export type IFBranch = IFSave & { parentSaveId?: string; forkIndex?: number };
+/** Branch snapshots are immutable: every history operation returns a new save. */
+export function forkIFSave(save: IFSave, end: number, replacement?: IFMessage): IFBranch {
+  if (!Number.isInteger(end) || end < 0 || end > save.messages.length) throw new Error("无效分支节点");
+  const next = structuredClone(save);
+  return { ...next, id: newIFId(), title: `${save.title} · 分支`, parentSaveId: save.id, forkIndex: end,
+    messages: [...next.messages.slice(0, end), ...(replacement ? [{ ...replacement }] : [])] };
+}
+/** Re-roll creates a sibling history, never includes the reply being replaced. */
+export async function rerollIFSave(save: IFSave, index: number, signal: AbortSignal, transport: IFTransport): Promise<IFBranch> {
+  if (save.messages[index]?.role !== "assistant" || save.messages[index - 1]?.role !== "user") throw new Error("只能重新生成用户消息后的回复");
+  const fork = forkIFSave(save, index - 1);
+  const next = await sendIFTurn(fork, save.messages[index - 1].content, signal, transport);
+  return { ...next, parentSaveId: save.id, forkIndex: index };
+}
 export function newIFSave(script: IFScript): IFSave {
   return { id: newIFId(), scriptId: script.id, title: `${script.title} · 新存档`, script: structuredClone(script), messages: script.opening ? [{ role: "assistant", content: script.opening }] : [], memory: "" };
 }
