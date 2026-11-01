@@ -205,6 +205,7 @@ export type MapWorld = {
   status?: "generating" | "failed";
   statusMessage?: string;  // failure reason
   failureRaw?: string;     // raw LLM output on failure, for the failure dialog
+  generationRaw?: string; // Complete response retained before parsing (no schema change).
 };
 
 // ── Character Agent State (per character in a world) ──

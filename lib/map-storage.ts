@@ -84,7 +84,20 @@ export function saveMapWorld(world: MapWorld): void {
   const idx = _worldsCache.findIndex(w => w.id === world.id);
   if (idx >= 0) _worldsCache[idx] = world;
   else _worldsCache.push(world);
-  mapDb.worlds.put(world).catch(() => undefined);
+  mapDb.worlds.put(world).catch(error => console.error("[MapStorage] world write failed", error));
+}
+
+/** Await transaction completion and read-back before publishing cache changes. */
+export async function persistMapWorld(world: MapWorld, save?: GameSave): Promise<void> {
+  await mapDb.transaction("rw", mapDb.worlds, mapDb.saves, async () => {
+    await mapDb.worlds.put(world);
+    if (save) await mapDb.saves.put(save);
+    const stored = await mapDb.worlds.get(world.id);
+    if (JSON.stringify(stored) !== JSON.stringify(world)) throw new Error("世界落盘校验失败");
+    if (save && JSON.stringify(await mapDb.saves.get(save.id)) !== JSON.stringify(save)) throw new Error("存档落盘校验失败");
+  });
+  _worldsCache = [..._worldsCache.filter(item => item.id !== world.id), world];
+  if (save) _savesCache = [..._savesCache.filter(item => item.id !== save.id), save];
 }
 
 export function deleteMapWorld(id: string): void {
@@ -117,7 +130,7 @@ export function saveGame(save: GameSave): void {
   const idx = _savesCache.findIndex(s => s.id === save.id);
   if (idx >= 0) _savesCache[idx] = save;
   else _savesCache.push(save);
-  mapDb.saves.put(save).catch(() => undefined);
+  mapDb.saves.put(save).catch(error => console.error("[MapStorage] save write failed", error));
 }
 
 export function deleteSave(id: string): void {
