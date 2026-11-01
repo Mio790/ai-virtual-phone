@@ -31,7 +31,9 @@ import { Toggle } from "@/components/ui/form";
 import { getApiLogs } from "@/lib/api-log-store";
 import { parseWorldSkeleton } from "@/lib/map-rpg-engine";
 import { persistMapWorld } from "@/lib/map-storage";
-import { removeCompanionNPCs } from "@/lib/map-companions";
+import { removeCompanionNPCs, CompanionIdentityError } from "@/lib/map-companions";
+import { assertRecoveryMapCompatible } from "@/lib/map-recovery-compat";
+import { loadSavesForWorld } from "@/lib/map-storage";
 
 type Props = {
   onClose: () => void;
@@ -76,6 +78,7 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
   const [recoveryText, setRecoveryText] = useState("");
   const [recoveryError, setRecoveryError] = useState("");
   const [recovering, setRecovering] = useState(false);
+  const [identityReview, setIdentityReview] = useState<{ fingerprint: string; conflicts: CompanionIdentityError["conflicts"]; decisions: Record<string, string> } | null>(null);
   const recoveryLogs = recoveryWorld ? getApiLogs().filter(log => /\[世界名\]/.test(log.rawResponse) && /#\s*区域/.test(log.rawResponse)) : [];
 
   const recoverWorld = async () => {
@@ -93,8 +96,15 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
       if (!renderedMap.l1Nodes.length) throw new Error("地图没有起始节点");
       const selected = characters.filter(character => selectedCharIds.includes(character.id));
       stage = "校验同行身份";
-      removeCompanionNPCs(skeleton, selected);
-      const existingSave = getLatestSave(recoveryWorld.id);
+      const fingerprint = JSON.stringify([recoveryWorld.id, recoveryText, selectedCharIds]);
+      try { removeCompanionNPCs(skeleton, selected, identityReview?.fingerprint === fingerprint ? identityReview.decisions : {}); }
+      catch (error) {
+        if (error instanceof CompanionIdentityError) setIdentityReview({ fingerprint, conflicts: error.conflicts, decisions: identityReview?.fingerprint === fingerprint ? identityReview.decisions : {} });
+        throw error;
+      }
+      stage = "校验旧存档地点";
+      assertRecoveryMapCompatible(recoveryWorld.renderedMap, renderedMap, loadSavesForWorld(recoveryWorld.id));
+      const existingSave = loadSavesForWorld(recoveryWorld.id)[0];
       let save = existingSave ? structuredClone(existingSave) : createInitialSave(recoveryWorld.id, renderedMap.l1Nodes[0].id);
       for (const character of selected) save = addAgentToSave(save, character.id, character.personality || "");
       stage = "写入并校验世界与存档";
@@ -353,6 +363,7 @@ export default function MapLobby({ onClose, onStartGame }: Props) {
         <textarea aria-label="完整世界原文预览与编辑" value={recoveryText} onChange={event => setRecoveryText(event.target.value)} style={{ display: "block", width: "100%", minHeight: 240, color: "black" }} />
         {characters.map(character => <label key={character.id} style={{ display: "block" }}><input type="checkbox" checked={selectedCharIds.includes(character.id)} onChange={() => toggleChar(character.id)} />{character.name}</label>)}
         {recoveryError && <p role="alert">{recoveryError}</p>}
+        {identityReview && identityReview.fingerprint === JSON.stringify([recoveryWorld.id, recoveryText, selectedCharIds]) && <fieldset><legend>逐项确认 NPC 身份（尚未保存）</legend>{identityReview.conflicts.map(conflict => <label key={conflict.key} style={{ display: "block" }}>{conflict.name}（记录 {Number(conflict.key) + 1}）<select value={identityReview.decisions[conflict.key] || ""} onChange={event => setIdentityReview({ ...identityReview, decisions: { ...identityReview.decisions, [conflict.key]: event.target.value } })}><option value="">请选择身份</option><option value="independent">独立 NPC，保留</option>{conflict.characterIds.map(id => <option key={id} value={id}>已选同行：{characters.find(character => character.id === id)?.name}（使用原角色 ID）</option>)}</select></label>)}<p>全部确认后再次点击“校验并离线恢复”；取消不会保存。</p></fieldset>}
         <button disabled={recovering || !recoveryText.trim()} onClick={recoverWorld}>{recovering ? "恢复中…" : "校验并离线恢复"}</button>
         <button disabled={recovering} onClick={() => setRecoveryWorld(null)}>取消</button>
       </div>}
