@@ -13,9 +13,12 @@ function createLoader(overrides = {}) {
       localStorage: overrides.localStorage, navigator: {}, console,
       fetch: overrides.fetch || (() => { throw new Error('UNMOCKED NETWORK BLOCKED'); }),
       setTimeout: overrides.setTimeout || setTimeout, clearTimeout: overrides.clearTimeout || clearTimeout,
+      requestAnimationFrame: overrides.requestAnimationFrame, cancelAnimationFrame: overrides.cancelAnimationFrame,
       window: overrides.window || {}, confirm: () => true,
       require(name) {
         if (name in overrides) return overrides[name];
+        // Node event harness does not render CSS. Real compilation is checked by Next build.
+        if (name.endsWith('.module.css')) return { default: new Proxy({}, { get: (_target, key) => String(key) }) };
         if (name === 'dexie') return require('dexie');
         if (name === 'jszip') return { default: require('jszip') };
         if (name === './api-log-store') return { pushApiLog() { throw new Error('Unexpected API log side effect'); } };

@@ -8,7 +8,7 @@
     "build": "node scripts/build-weixin-assistant-dist.mjs && node scripts/build-personal-push-dist.mjs && next build && node scripts/restore-backdrop-filter.mjs",
     "start": "node scripts/local-next-server.mjs --prod",
     "lint": "next lint",
-    "test:if": "node scripts/test-if-theater.cjs && node scripts/test-if-branches.cjs && node scripts/test-if-stream.cjs && node scripts/test-if-integration.cjs && node scripts/test-if-ui-actions.cjs && node scripts/test-if-stage-c.cjs && node scripts/test-if-backup.cjs",
+    "test:if": "node scripts/test-if-theater.cjs && node scripts/test-if-branches.cjs && node scripts/test-if-stream.cjs && node scripts/test-if-integration.cjs && node scripts/test-if-ui-actions.cjs && node scripts/test-if-stage-c.cjs && node scripts/test-if-backup.cjs && node scripts/test-if-ui-style.cjs",
     "check:sdk": "node scripts/check-custom-app-sdk-consistency.mjs",
     "check:weixin": "node scripts/check-weixin-prompt-equivalence.mjs",
     "check:push": "node scripts/check-personal-push-dist.mjs",

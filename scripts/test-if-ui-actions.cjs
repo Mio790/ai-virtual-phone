@@ -5,7 +5,7 @@ const assert = require('node:assert/strict');
 const Dexie = require('dexie');
 const tick = () => new Promise(resolve => setImmediate(resolve));
 function harness(loadOptions) {
-  const hooks = [], effects = [], timers = new Map(); let index = 0, mounted = false, tree;
+  const hooks = [], effects = [], cleanups = [], timers = new Map(); let index = 0, mounted = false, tree;
   const react = {
     useState(initial) { const i = index++; if (!(i in hooks)) hooks[i] = initial; return [hooks[i], value => { hooks[i] = typeof value === 'function' ? value(hooks[i]) : value; }]; },
     useRef(initial) { const i = index++; if (!(i in hooks)) hooks[i] = { current: initial }; return hooks[i]; },
@@ -23,7 +23,7 @@ function harness(loadOptions) {
   function nodes() { const all = []; function walk(node) { if (Array.isArray(node)) return node.forEach(walk); if (!node || typeof node !== 'object') return; all.push(node); walk(node.props?.children); } walk(tree); return all; }
   const find = (type, label) => { const n = nodes().find(n => n.type === type && (n.props['aria-label'] === label || text(n) === label)); assert.ok(n, `${type}: ${label}`); return n; };
   const click = async (type, label) => { const node = find(type, label); assert.ok(!node.props.disabled, `disabled ${label}`); await node.props.onClick(); render(); };
-  return { load, render, nodes, text, find, click, timers, mount: async () => { render(); effects.splice(0).forEach(effect => effect()); for (let i = 0; i < 5; i++) await tick(); render(); } };
+  return { load, render, nodes, text, find, click, timers, unmount: () => cleanups.forEach(cleanup => cleanup?.()), mount: async setup => { render(); setup?.(tree); effects.splice(0).forEach(effect => cleanups.push(effect())); for (let i = 0; i < 5; i++) await tick(); render(); } };
 }
 (async () => {
   let calls = 0, responseText = 'UI-A1', blocked = false, prompts = [];
@@ -39,7 +39,12 @@ function harness(loadOptions) {
   const save = domain.newIFSave(fixture()); save.title = '合成存档';
   await storage.writeIFData({ revision: 0, scripts: [fixture()], saves: [save] });
   await h.mount();
+  assert.equal(h.render().props.className, 'root');
+  assert.ok(h.nodes().some(n => n.type === 'header' && n.props.className === 'header'));
+  assert.ok(h.nodes().some(n => n.type === 'main' && n.props.className === 'scroll'));
   await h.click('button', '合成存档 · 0 条');
+  assert.ok(h.nodes().some(n => n.type === 'footer' && n.props.className === 'composer'));
+  assert.equal(h.find('button', 'Stop').props.disabled, true);
   function chooseAPI() { const select = h.nodes().find(n => n.type === 'select' && h.text(n).includes('请选择（不自动调用）')); assert.ok(select); select.props.onChange({ target: { value: 'mock' } }); h.render(); }
   chooseAPI();
   h.find('textarea', 'IF 专属记忆').props.onChange({ target: { value: 'UI-PRIVATE-MEMORY' } }); h.render();
@@ -55,7 +60,9 @@ function harness(loadOptions) {
   articles[1].props.onPointerMove({ clientX: 1, clientY: 30 }); assert.equal(h.timers.size, 0);
   articles[1].props.onPointerDown({ isPrimary: true, clientX: 1, clientY: 1 });
   for (const callback of h.timers.values()) callback(); h.timers.clear(); h.render();
-  h.find('div', '气泡操作'); responseText = 'UI-A2';
+  const menu = h.find('div', '气泡操作');
+  assert.equal(menu.props['aria-modal'], 'true'); assert.equal(menu.props.className, 'sheet');
+  responseText = 'UI-A2';
   await h.click('button', 'Re-roll（一次请求）');
   data = await storage.readIFData(); assert.equal(calls, 3); assert.equal(data.saves.length, 2);
   assert.ok(!JSON.stringify(prompts.at(-1)).includes('UI-A1'));
@@ -115,5 +122,26 @@ function harness(loadOptions) {
   await reopened.mount();
   assert.ok(reopened.nodes().some(n => n.type === 'p' && reopened.text(n) === responseText));
   assert.ok(reopened.nodes().some(n => n.type === 'span' && reopened.text(n).includes('1 / 2')));
+  // Editor/dismissal is presentation-only: labelled fields and bottom actions,
+  // no write and no request when cancelling an unsaved template.
+  await h.click('button', '回到大厅');
+  const beforeEditor = JSON.stringify(await storage.readIFData()), beforeEditorCalls = calls;
+  await h.click('button', '＋ 新建剧本');
+  for (const label of ['剧本标题', '完整世界观', '时刻设定', '开场白', '主控人设', '剧本规则']) {
+    const field = h.find('textarea', label); assert.ok(field.props.placeholder); assert.ok(field.props['aria-describedby']);
+  }
+  assert.ok(h.nodes().some(n => n.type === 'footer' && n.props.className === 'footer'));
+  await h.click('button', '取消');
+  assert.equal(JSON.stringify(await storage.readIFData()), beforeEditor); assert.equal(calls, beforeEditorCalls);
+  // Only a geometry simulation, not a real keyboard/WebKit test.
+  const listeners = new Map(), viewport = { height: 420, offsetTop: 0, scale: 1, addEventListener: (name, fn) => listeners.set(name, fn), removeEventListener: name => listeners.delete(name) };
+  const properties = {}, element = { dataset: {}, style: { setProperty: (key, value) => { properties[key] = value; } }, parentElement: { getBoundingClientRect: () => ({ top: 0, bottom: 800, height: 800 }) } };
+  const keyboard = harness({ window: { visualViewport: viewport }, requestAnimationFrame: callback => { callback(); return 1; }, cancelAnimationFrame: () => {} });
+  await keyboard.mount(tree => { tree.props.ref.current = element; });
+  assert.equal(properties['--if-visible-height'], '420px'); assert.equal(element.dataset.keyboard, 'true');
+  viewport.height = 800; listeners.get('resize')();
+  assert.equal(properties['--if-visible-height'], '800px'); assert.equal(element.dataset.keyboard, 'false');
+  keyboard.unmount(); assert.equal(listeners.size, 0);
   console.log('PASS actual TSX event/hook harness + Mock SSE/fake IndexedDB: scrolling cancels long press; menu Re-roll; version arrows/count; normal Send stays on branch; selected history only; Edit/Delete/Backtrack/fork; Stop; failed write + local recovery; remount restores active branch/versions. NOT browser/iPhone validation.');
+  console.log('PASS mobile UI structure: scoped styles, header/scroll/composer, labelled editor fields, modal semantics, cancel without writes; visualViewport resize/cleanup geometry simulation only.');
 })().catch(error => { console.error(error); process.exitCode = 1; });
