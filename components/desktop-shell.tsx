@@ -29,6 +29,7 @@ import { StoryApp } from "@/components/story/story-app";
 import { VnApp } from "@/components/vn/vn-app";
 import ReadingApp from "@/components/reading/reading-app";
 import MapApp from "@/components/map/map-app";
+import IFTheaterApp from "@/components/if-theater/if-theater-app";
 import { DwellingApp } from "@/components/dwelling/dwelling-app";
 import { MascotFloat } from "@/components/mascot/mascot-float";
 import { MascotPreviewHost } from "@/components/mascot/mascot-preview-host";
@@ -4073,6 +4074,7 @@ html,body{margin:0;padding:0;width:100%;height:100%;background:#121110;color:rgb
     if (activeApp === "mapmode") {
       return <MapApp onClose={() => setActiveApp(null)} />;
     }
+    if (activeApp === "iftheater") return <IFTheaterApp onClose={() => setActiveApp(null)} />;
 
     if (activeApp === "dwelling") {
       // DwellingApp is rendered separately (kept alive) — see below
