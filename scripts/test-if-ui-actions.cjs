@@ -42,8 +42,12 @@ function harness(loadOptions) {
   await h.click('button', '合成存档 · 0 条');
   function chooseAPI() { const select = h.nodes().find(n => n.type === 'select' && h.text(n).includes('请选择（不自动调用）')); assert.ok(select); select.props.onChange({ target: { value: 'mock' } }); h.render(); }
   chooseAPI();
+  h.find('textarea', 'IF 专属记忆').props.onChange({ target: { value: 'UI-PRIVATE-MEMORY' } }); h.render();
+  await h.click('button', '保存专属记忆（不调用模型）'); assert.equal(calls, 0);
+  assert.equal((await storage.readIFData()).saves[0].memory, 'UI-PRIVATE-MEMORY');
   async function send(input) { h.find('textarea', '剧场消息').props.onChange({ target: { value: input } }); h.render(); await h.click('button', '发送一次请求'); }
   await send('UI-U1'); responseText = 'UI-OLD-FUTURE'; await send('UI-U2');
+  assert.ok(prompts.every(prompt => JSON.stringify(prompt).includes('UI-PRIVATE-MEMORY')));
   let data = await storage.readIFData(); assert.equal(calls, 2, h.text(h.render())); assert.equal(data.saves.length, 1);
   // A scroll cancels the long press; a stationary primary press opens it.
   let articles = h.nodes().filter(n => n.type === 'article');

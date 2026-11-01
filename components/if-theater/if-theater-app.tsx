@@ -3,9 +3,10 @@ import { useEffect, useRef, useState } from "react";
 import { loadCharacters } from "@/lib/character-storage";
 import { loadApiConfigs } from "@/lib/settings-storage";
 import { streamIFReply } from "@/lib/if-theater-stream";
-import { buildIFPrompt, ifTurnContext, newIFId, newIFSave, forkIFSave, type IFData, type IFScript } from "@/lib/if-theater";
+import { buildIFPrompt, ifTurnContext, newIFId, newIFSave, forkIFSave, editIFMemory, type IFData, type IFScript } from "@/lib/if-theater";
 import { readIFData, writeIFData, readIFPending, clearIFPending, type IFPending } from "@/lib/if-theater-storage";
 import { runIFStreamingTurn, recoverIFPending } from "@/lib/if-theater-turn";
+import { isIFOfflineAcceptance, IF_TEST_CONFIG, requestIFAcceptance } from "@/lib/if-theater-test-support";
 
 export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const [data, setData] = useState<IFData | null>(null);
@@ -19,15 +20,18 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const [partial, setPartial] = useState("");
   const [menu, setMenu] = useState<number | null>(null);
   const [pending, setPending] = useState<IFPending[]>([]);
+  const [memoryDraft, setMemoryDraft] = useState<{ saveId: string; text: string } | null>(null);
+  const [acceptance, setAcceptance] = useState(false);
   const press = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pointer = useRef({ x: 0, y: 0 });
   const controller = useRef<AbortController | null>(null);
   const lock = useRef(false);
   const characters = loadCharacters();
-  const configs = loadApiConfigs();
+  const configs = acceptance ? [IF_TEST_CONFIG] : loadApiConfigs();
   const save = data?.saves.find(item => item.id === saveId);
   useEffect(() => {
     let mounted = true;
+    if (window.location && isIFOfflineAcceptance(window.location)) { setAcceptance(true); setApiId(IF_TEST_CONFIG.id); }
     readIFData().then(data => { if (mounted) { setData(data); setSaveId(data.saves.some(save => save.id === data.activeSaveId) ? data.activeSaveId! : ""); } }).catch(error => { if (mounted) setError(String(error)); });
     readIFPending().then(pending => { if (mounted) setPending(pending); }).catch(error => { if (mounted) setError(`检查点读取失败（未改动旧历史）：${String(error)}`); });
     return () => { mounted = false; controller.current?.abort(); if (press.current) clearTimeout(press.current); };
@@ -59,7 +63,7 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
     setPartial(""); setMenu(null);
     try {
       const result = await runIFStreamingTurn(data, save.id, input, abort.signal,
-        (messages, signal, onDelta) => streamIFReply(config, messages, signal, onDelta), setPartial, rerollIndex);
+        (messages, signal, onDelta) => streamIFReply(config, messages, signal, onDelta, acceptance ? requestIFAcceptance : undefined), setPartial, rerollIndex);
       setData(result.data); setSaveId(result.saveId); setError(result.warning);
       if (rerollIndex === undefined) setInput("");
       setPartial("");
@@ -71,6 +75,7 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
   const style = { display: "block", width: "100%", minHeight: 80, color: "#111", marginBottom: 12 };
   return <section style={{ position: "absolute", inset: 0, overflow: "auto", padding: "max(16px, env(safe-area-inset-top)) 16px max(24px, env(safe-area-inset-bottom))", background: "#17151b", color: "#eee" }}>
     <button disabled={busy} onClick={onClose}>关闭</button><h2>多人 IF 剧场</h2>
+    {acceptance && <p role="status">本地合成验收模式：IF 回复零网络、零费用；不会使用真实 Key。数据仍只存此预览域名。其他 App 不属于演练模式。</p>}
     <p>独立剧本与存档。历史修改另存分支，旧剧情保留。</p>
     {error && <p role="alert">{error}</p>}
     {pending.map(item => <details key={item.id}><summary>中断回复检查点（仅本地，不请求模型）</summary><pre style={{ whiteSpace: "pre-wrap" }}>{item.text || "请求前检查点，尚无回复"}</pre>
@@ -88,6 +93,10 @@ export default function IFTheaterApp({ onClose }: { onClose: () => void }) {
     </> : save ? <>
       <button disabled={busy} onClick={() => run(() => selectSave(""))}>回到大厅</button><h3>{save.title}</h3>
       <p>本存档持有独立世界原文与角色快照；编辑大厅剧本不会改动当前存档。</p>
+      <details><summary>当前存档／分支专属记忆</summary><p>手动编辑并保存后，每轮完整注入。不自动总结，不读取或修改现代记忆；其他分支不会跟着改变。</p>
+        <textarea aria-label="IF 专属记忆" disabled={busy} style={style} value={memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory} onChange={event => setMemoryDraft({ saveId: save.id, text: event.target.value })} />
+        <button disabled={busy} onClick={() => run(async () => { await commit(editIFMemory(data, save.id, memoryDraft?.saveId === save.id ? memoryDraft.text : save.memory)); setMemoryDraft(null); })}>保存专属记忆（不调用模型）</button>
+      </details>
       <button disabled={busy} onClick={() => run(async () => {
         const actors = save.script.actors.map(actor => ({ ...snapshot(actor.characterId), identity: actor.identity }));
         await commit({ ...data, saves: data.saves.map(item => item.id === save.id ? { ...save, script: { ...save.script, actors } } : item) });

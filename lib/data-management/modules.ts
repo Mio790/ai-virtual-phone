@@ -369,6 +369,10 @@ const PRIMARY_DATA_MODULES: DataModuleDefinition[] = [
         ],
         prefixes: ["map_world_theme_", "map_adventure_summary_", "ai_phone_black_market_theater_events_"],
       },
+      {
+        type: "kv", label: "多人 IF 剧场（剧本、分支、版本、专属记忆与回复检查点）",
+        keys: ["ai_phone_if_theater_v1"], prefixes: ["ai_phone_if_pending_", "ai_phone_if_delta_"], databaseOnly: true,
+      },
     ],
   },
 ];

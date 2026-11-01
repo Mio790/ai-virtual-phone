@@ -21,6 +21,8 @@ export type IndexedDbSource = {
 
 export type KvSource = {
   type: "kv";
+  /** Transaction-owned IF data must not be shadowed by stale synchronous cache. */
+  databaseOnly?: boolean;
   keys?: string[];
   prefixes?: string[];
   includeAll?: boolean;

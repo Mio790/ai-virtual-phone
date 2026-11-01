@@ -7,6 +7,11 @@ export type IFSave = { id: string; scriptId: string; title: string; script: IFSc
 export type IFVersionGroup = { index: number; saveIds: string[] };
 export type IFData = { revision: number; scripts: IFScript[]; saves: IFSave[]; replyVersions?: IFVersionGroup[]; activeSaveId?: string };
 export const newIFId = () => crypto.randomUUID();
+/** Explicit user-managed memory, scoped to one save/branch; no summaries or modern writes. */
+export function editIFMemory(data: IFData, saveId: string, memory: string): IFData {
+  if (!data.saves.some(save => save.id === saveId)) throw new Error("存档不存在，记忆未修改");
+  return { ...data, saves: data.saves.map(save => save.id === saveId ? { ...save, memory } : save) };
+}
 export type IFBranch = IFSave & { parentSaveId?: string; forkIndex?: number };
 /** Branch snapshots are immutable: every history operation returns a new save. */
 export function forkIFSave(save: IFSave, end: number, replacement?: IFMessage): IFBranch {

@@ -1,5 +1,5 @@
 import { applyIFReply, ifTurnContext, newIFId, type IFData, type IFPromptMessage } from "./if-theater";
-import { checkpointIFReply, clearIFPending, writeIFData, type IFPending } from "./if-theater-storage";
+import { checkpointIFReply, clearIFPending, readIFData, writeIFData, type IFPending } from "./if-theater-storage";
 
 export type IFStreamTransport = (messages: IFPromptMessage[], signal: AbortSignal, onDelta: (text: string) => Promise<void>) => Promise<string>;
 /** Shared by Send and menu Re-roll. Storage is verified before spending a request. */
@@ -10,7 +10,8 @@ export async function runIFStreamingTurn(data: IFData, saveId: string, input: st
   if (rerollIndex === undefined && !input.trim()) throw new Error("请输入内容");
   const messages = ifTurnContext(save, input, rerollIndex);
   const pending: IFPending = { id: newIFId(), data, saveId, input, text: "", rerollIndex };
-  await checkpointIFReply(pending);
+  try { await checkpointIFReply(pending); }
+  catch (error) { throw new Error(`请求前检查点写入失败，未调用模型：${String(error)}`, { cause: error }); }
   let warning = "";
   try {
     await transport(messages, signal, async delta => {
@@ -23,7 +24,8 @@ export async function runIFStreamingTurn(data: IFData, saveId: string, input: st
     if (!pending.text) { await clearIFPending(pending.id); throw error; }
     warning = `已停止或中断，保留未完成回复：${error instanceof Error ? error.message : String(error)}`;
     // If checkpoint failed, retry only local persistence, never the model request.
-    await checkpointIFReply(pending);
+    try { await checkpointIFReply(pending); }
+    catch (writeError) { throw new Error(`回复落盘失败，请先复制屏幕文本；刷新仅能恢复最后成功的检查点：${String(writeError)}`, { cause: writeError }); }
   }
   if (!pending.text.trim()) { await clearIFPending(pending.id); throw new Error("返回为空，未修改历史"); }
   const next = applyIFReply(data, saveId, input, pending.text, !!warning, rerollIndex);
@@ -34,8 +36,12 @@ export async function runIFStreamingTurn(data: IFData, saveId: string, input: st
 }
 
 export async function recoverIFPending(pending: IFPending) {
-  // Optimistic revision check in writeIFData rejects stale recovery, never overwrites.
-  const next = applyIFReply(pending.data, pending.saveId, pending.input, pending.text, true, pending.rerollIndex);
+  const current = await readIFData();
+  // Imported checkpoints may have an older revision. Rebase ONLY when every
+  // script/save/branch/memory field still matches; never merge divergent history.
+  const content = ({ revision: _revision, ...data }: IFData) => JSON.stringify(data);
+  if (content(current) !== content(pending.data)) throw new Error("另一个窗口或恢复操作已修改剧场；检查点与当前历史不一致，未覆盖");
+  const next = applyIFReply(current, pending.saveId, pending.input, pending.text, true, pending.rerollIndex);
   const persisted = await writeIFData(next.data);
   let warning = "";
   try { await clearIFPending(pending.id); } catch { warning = "回复已恢复，但检查点清理失败；不要重复恢复，可复制后移除检查点"; }
